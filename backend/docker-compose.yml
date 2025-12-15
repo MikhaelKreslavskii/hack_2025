@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16 # Use a specific, stable version of Postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: tatneft
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # Persist data in a named volume
+    ports:
+      - "6422:5432" # Map the container's port 5432 to the host's port 5432
+
+volumes:
+  postgres_data:

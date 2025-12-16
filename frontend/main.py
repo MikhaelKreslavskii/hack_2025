@@ -44,6 +44,7 @@ if uploaded_h is not None and uploaded_h_predict is not None:
         df_predict_h = df_predict_h.rename(columns={'value': 'h_kol'})
         st.success('Данные для предсказания успешно загружены')
         st.dataframe(df_predict_h)
+        print(df_predict_h['well'].nunique())
         x_predict = df_predict_h['x'].values.tolist()
         y_predict = df_predict_h['y'].values.tolist()
         h_kol_predict = df_predict_h['h_kol'].values.tolist()
@@ -68,11 +69,11 @@ if uploaded_h is not None and uploaded_h_predict is not None:
                     if 'FF' in name.upper():
                         print('EFF')
                         df_eff_h = read_navigator_file(file_like)  # Модифицируйте функцию
-                        print(df_eff_h.head())
+                        print(df_eff_h.shape)
                     else:
                         print('H')
                         df_h = read_navigator_file(file_like)
-                        print(df_h.head())
+                        print(df_h.shape)
 
                 except Exception as e:
                     st.error(f"Ошибка файла {name}: {e}")
@@ -82,21 +83,35 @@ if uploaded_h is not None and uploaded_h_predict is not None:
         if not df_eff_h.empty and not df_h.empty:
             df_eff_h = df_eff_h.rename(columns={'value': 'eff_h'})
             df_h = df_h.rename(columns={'value': 'h'})
+        df_eff_h.drop(columns=['z'], inplace=True)
+        df_h.drop(columns=['z'], inplace=True)
 
-        df_merged = pd.merge(df_eff_h, df_h, on=['x', 'y', 'z', 'well'], how='inner')
+
+        for df in [df_eff_h, df_h, df_predict_h]:
+            df[['x', 'y']] = df[['x', 'y']].astype(float).round(4)
+        # 3. ✅ Первый merge БЕЗ drop_duplicates
+        print(f"Перед merge: eff_h={len(df_eff_h)}, h={len(df_h)}, predict={len(df_predict_h)}")
+        df_merged = pd.merge(df_eff_h, df_h, on=['x', 'y', 'well'], how='inner')
+        print(f"df_merged: {len(df_merged)}")
         df_merged['h_kol'] = df_merged['eff_h'] / df_merged['h']
+
+        # 4. ✅ Второй merge
+        merged_comparison = pd.merge(
+            df_merged[['well', 'x', 'y', 'h_kol']],
+            df_predict_h[['well', 'x', 'y', 'h_kol']],
+            on=['well', 'x', 'y'],
+            how='inner',
+            suffixes=('_fact', '_pred')
+        )
+        print(f"merged_comparison: {len(merged_comparison)}")
         st.success(f"✅ Объединено {len(df_merged)} скважин")
         st.dataframe(df_merged.head())
         methods = ['rbf', 'idw', 'linear', 'cubic', 'kriging', 'svr']
-        # Получаем данные для визуализации
-        x = df_merged['x'].values
-        y = df_merged['y'].values
 
-        x_predict = df_predict_h['x'].values
-        y_predict = df_predict_h['y'].values
-        z_predict = df_predict_h['z'].values
 
-        z_coords = df_merged['z'].values  # координаты Z скважин
+        x_predict = df_merged['x'].values
+        y_predict = df_merged['y'].values
+
         z_values = df_merged['h_kol'].values  # значения h_kol
         # Dropdown
         selected_method = st.selectbox(
@@ -113,14 +128,14 @@ if uploaded_h is not None and uploaded_h_predict is not None:
         if selected_method == 'rbf':
             method_params = {'rbf_function': 'linear', 'smooth': 0.1}
         elif selected_method == 'idw':
-            method_params = {'power': 2, 'neighbors': min(10, len(x))}
+            method_params = {'power': 2, 'neighbors': min(10, len(x_predict))}
         elif selected_method == 'svr':
             method_params = {'kernel': 'rbf', 'C': 100, 'gamma': 0.1}
 
         try:
             print(f"\nВыполняем интерполяцию методом: {selected_method}...")
             xi, yi, zi_extrapolated, xi_grid, yi_grid = create_extrapolated_surface(
-                x_predict, y_predict, z_predict,
+                x_predict, y_predict, z_values,
                 grid_points=150,
                 expansion=0.3,
                 method=selected_method,
@@ -133,7 +148,7 @@ if uploaded_h is not None and uploaded_h_predict is not None:
             print("Использую линейную интерполяцию как запасной вариант...")
             selected_method = 'linear'
             xi, yi, zi_extrapolated, xi_grid, yi_grid = create_extrapolated_surface(
-                x_predict, y_predict, z_predict,
+                x_predict, y_predict, z_values,
                 grid_points=150,
                 expansion=0.3,
                 method=selected_method
@@ -148,27 +163,22 @@ if uploaded_h is not None and uploaded_h_predict is not None:
         x_predict = df_predict_h['x'].values.tolist()
         y_predict = df_predict_h['y'].values.tolist()
         z_predict = df_predict_h['z'].values.tolist()
-        # x_list = df_merged['x'].values.tolist()
-        # y_list = df_merged['y'].values.tolist()
+
         h_kol_list = df_predict_h['h_kol'].values.tolist()
         well_list = df_merged['well'].values.tolist()
         boundary_x_list = list(boundary_x)  # list()
         boundary_y_list = list(boundary_y)
 
-        # ✅ Merge с координатами для правильного соответствия
-        merged_comparison = pd.merge(
-            df_merged[['well', 'x', 'y', 'h_kol']],
-            df_predict_h[['well', 'x', 'y', 'h_kol']],
-            on='well',
-            how='inner',
-            suffixes=('_fact', '_pred')
-        )
+        # df_predict_h[['x', 'y']] = df_predict_h[['x', 'y']].round(5)
+        # merge_columns = ['x', 'y']  # well оставляем строкой
+        #
 
         merged_comparison['delta'] = merged_comparison['h_kol_pred'] - merged_comparison['h_kol_fact']
-
+        print(f'Merge comparison {merged_comparison.shape}')
+        print(merged_comparison.head())
         # ✅ Используем координаты из merged_comparison
-        x_pred = merged_comparison['x_pred'].tolist()
-        y_pred = merged_comparison['y_pred'].tolist()
+        x_pred = merged_comparison['x'].tolist()
+        y_pred = merged_comparison['y'].tolist()
         h_pred = merged_comparison['h_kol_pred'].tolist()
         h_fact = merged_comparison['h_kol_fact'].tolist()
         delta = merged_comparison['delta'].tolist()

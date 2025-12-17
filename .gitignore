@@ -2,3 +2,4 @@
 venv
 frontend/WELL_009.las
 frontend/results_h_kol_rbf.csv
+frontend/main_2d.py

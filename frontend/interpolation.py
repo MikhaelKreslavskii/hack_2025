@@ -14,13 +14,11 @@ def read_navigator_file(file_like):
     """Чтение файла тНавигатора из BytesIO или файла"""
     if hasattr(file_like, 'read'):  # BytesIO
         lines = file_like.readlines()
-        print('byte')
         file_like.seek(0)  # Сброс позиции
     else:  # Файловый путь
         with open(file_like, 'r', encoding='utf-8') as f:
-            print('file')
             lines = f.readlines
-            print(lines)
+
     data_start = 0
     for i, line in enumerate(lines):
         if line.strip() == 'Float Value':
@@ -40,7 +38,6 @@ def read_navigator_file(file_like):
                     y = float(parts[1])
                     z = float(parts[2])
                     well = parts[3].decode('utf-8')
-                    print(well)
                     value = float(parts[4])
                     data.append([x, y, z, well, value])
                 except ValueError:

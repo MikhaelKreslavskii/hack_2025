@@ -7,19 +7,19 @@ CREATE TABLE IF NOT EXISTS well (
 );
 
 CREATE TABLE IF NOT EXISTS tvt_predict (
-    id SERIAL PRIMARY KEY,
     name VARCHAR(255) PRIMARY KEY,
     x FLOAT,
     y FLOAT,
-    md FLOAT
+    h_kol FLOAT
+
 );
 
 CREATE TABLE IF NOT EXISTS tvt_fact (
-    id SERIAL PRIMARY KEY,
     name VARCHAR(255) PRIMARY KEY,
     x FLOAT,
     y FLOAT,
-    md FLOAT
+    h_kol FLOAT
+
 );
 
 CREATE INDEX IF NOT EXISTS idx_well_name ON well(name);

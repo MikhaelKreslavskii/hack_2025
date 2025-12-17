@@ -1,264 +1,16 @@
-import zipfile
-from io import BytesIO
-import plotly.graph_objects as go
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
-import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 import io
 import base64
+from io import BytesIO
 
-from interpolation import read_navigator_file, create_extrapolated_surface, create_original_area_boundary
-
-method_descriptions = {
-    'linear': 'Линейная интерполяция (scipy)',
-    'cubic': 'Кубическая интерполяция (scipy)',
-    'nearest': 'Ближайший сосед (scipy)',
-    'rbf': 'Радиальные базисные функции',
-    'idw': 'Обратное расстояние (Inverse Distance Weighting)',
-    'kriging': 'Кригинг (Гауссовские процессы)',
-    'svr': 'Support Vector Regression'
-}
-
-st.title('MVP Хакатона')
-uploaded_zip = st.file_uploader("Загрузите папку как ZIP", type="zip")
-if uploaded_zip is not None:
-    files = {'zip': uploaded_zip}
-    response = requests.post("http://localhost:8000/api/v1/upload_files/", files=files)
-
-    if response.status_code == 200:
-        st.success("Архив обработан!")
-        st.json(response.json())
-    else:
-        st.error(f"Ошибка: {response.text}")
-
-st.text('Интерполяция')
-uploaded_h = st.file_uploader("Загрузите архив с фактическими данными EFF_H, H", type="zip")
-uploaded_h_predict = st.file_uploader("Загрузите файл с предсказанными данными EFF_H, H")
-
-#читаем предсказанный файл и конвертим в датафрейм
-if uploaded_h is not None and uploaded_h_predict is not None:
-    with st.spinner("🔄 Обработка данных..."):
-        df_predict_h = pd.DataFrame()
-        file_content = BytesIO(uploaded_h_predict.read())
-        df_predict_h = read_navigator_file(file_content)
-        df_predict_h = df_predict_h.rename(columns={'value': 'h_kol'})
-        st.success('Данные для предсказания успешно загружены')
-        st.dataframe(df_predict_h)
-        print(df_predict_h['well'].nunique())
-        x_predict = df_predict_h['x'].values.tolist()
-        y_predict = df_predict_h['y'].values.tolist()
-        h_kol_predict = df_predict_h['h_kol'].values.tolist()
-
-    if uploaded_h is not None:
-        df_eff_h = pd.DataFrame()
-        df_h = pd.DataFrame()
-        zip_content = BytesIO(uploaded_h.read())
-
-        with zipfile.ZipFile(zip_content) as zip_ref:
-            file_names = zip_ref.namelist()
-            st.write("Файлы в архиве:", [f.split('/')[-1] for f in file_names])
-
-            for name in file_names:
-                try:
-                    content_bytes = zip_ref.read(name)
-                    las_text = content_bytes.decode('utf-8', errors='ignore')
-
-                    # Создаем BytesIO объект вместо filepath
-                    file_like = BytesIO(content_bytes)
-                    print(name)
-                    if 'FF' in name.upper():
-                        print('EFF')
-                        df_eff_h = read_navigator_file(file_like)  # Модифицируйте функцию
-                        print(df_eff_h.shape)
-                    else:
-                        print('H')
-                        df_h = read_navigator_file(file_like)
-                        print(df_h.shape)
-
-                except Exception as e:
-                    st.error(f"Ошибка файла {name}: {e}")
-                    continue
-
-        # Обработка DataFrame...
-        if not df_eff_h.empty and not df_h.empty:
-            df_eff_h = df_eff_h.rename(columns={'value': 'eff_h'})
-            df_h = df_h.rename(columns={'value': 'h'})
-        df_eff_h.drop(columns=['z'], inplace=True)
-        df_h.drop(columns=['z'], inplace=True)
-
-
-        for df in [df_eff_h, df_h, df_predict_h]:
-            df[['x', 'y']] = df[['x', 'y']].astype(float).round(4)
-        # 3. ✅ Первый merge БЕЗ drop_duplicates
-        print(f"Перед merge: eff_h={len(df_eff_h)}, h={len(df_h)}, predict={len(df_predict_h)}")
-        df_merged = pd.merge(df_eff_h, df_h, on=['x', 'y', 'well'], how='inner')
-        print(f"df_merged: {len(df_merged)}")
-        df_merged['h_kol'] = df_merged['eff_h'] / df_merged['h']
-
-        # 4. ✅ Второй merge
-        merged_comparison = pd.merge(
-            df_merged[['well', 'x', 'y', 'h_kol']],
-            df_predict_h[['well', 'x', 'y', 'h_kol']],
-            on=['well', 'x', 'y'],
-            how='inner',
-            suffixes=('_fact', '_pred')
-        )
-        print(f"merged_comparison: {len(merged_comparison)}")
-        st.success(f"✅ Объединено {len(df_merged)} скважин")
-        st.dataframe(df_merged.head())
-        methods = ['rbf', 'idw', 'linear', 'cubic', 'kriging', 'svr']
-
-
-        x_predict = df_merged['x'].values
-        y_predict = df_merged['y'].values
-
-        z_values = df_merged['h_kol'].values  # значения h_kol
-        # Dropdown
-        selected_method = st.selectbox(
-            "Выберите метод интерполяции:",
-            methods,
-            index=0,  # По умолчанию первый элемент
-            help="rbf - рекомендуется"
-        )
-
-        st.write(f"Выбран: {selected_method}")
-
-        # Параметры для выбранного метода
-        method_params = {}
-        if selected_method == 'rbf':
-            method_params = {'rbf_function': 'linear', 'smooth': 0.1}
-        elif selected_method == 'idw':
-            method_params = {'power': 2, 'neighbors': min(10, len(x_predict))}
-        elif selected_method == 'svr':
-            method_params = {'kernel': 'rbf', 'C': 100, 'gamma': 0.1}
-
-        try:
-            print(f"\nВыполняем интерполяцию методом: {selected_method}...")
-            xi, yi, zi_extrapolated, xi_grid, yi_grid = create_extrapolated_surface(
-                x_predict, y_predict, z_values,
-                grid_points=150,
-                expansion=0.3,
-                method=selected_method,
-                **method_params
-            )
-            print(f"Интерполяция успешно выполнена!")
-
-        except Exception as e:
-            print(f"\nОшибка при интерполяции методом {selected_method}: {e}")
-            print("Использую линейную интерполяцию как запасной вариант...")
-            selected_method = 'linear'
-            xi, yi, zi_extrapolated, xi_grid, yi_grid = create_extrapolated_surface(
-                x_predict, y_predict, z_values,
-                grid_points=150,
-                expansion=0.3,
-                method=selected_method
-            )
-
-        # Создаем границу исходной области
-        boundary_x, boundary_y = create_original_area_boundary(x_predict, y_predict)
-        # КОНВЕРТАЦИЯ ВСЕГО в чистые Python типы
-        xi_list = xi.tolist()
-        yi_list = yi.tolist()
-        zi_list = zi_extrapolated.tolist()  # 2D list для contour
-        x_predict = df_predict_h['x'].values.tolist()
-        y_predict = df_predict_h['y'].values.tolist()
-        z_predict = df_predict_h['z'].values.tolist()
-
-        h_kol_list = df_predict_h['h_kol'].values.tolist()
-        well_list = df_merged['well'].values.tolist()
-        boundary_x_list = list(boundary_x)  # list()
-        boundary_y_list = list(boundary_y)
-
-        # df_predict_h[['x', 'y']] = df_predict_h[['x', 'y']].round(5)
-        # merge_columns = ['x', 'y']  # well оставляем строкой
-        #
-
-        merged_comparison['delta'] = merged_comparison['h_kol_pred'] - merged_comparison['h_kol_fact']
-        print(f'Merge comparison {merged_comparison.shape}')
-        print(merged_comparison.head())
-        # ✅ Используем координаты из merged_comparison
-        x_pred = merged_comparison['x'].tolist()
-        y_pred = merged_comparison['y'].tolist()
-        h_pred = merged_comparison['h_kol_pred'].tolist()
-        h_fact = merged_comparison['h_kol_fact'].tolist()
-        delta = merged_comparison['delta'].tolist()
-        wells = merged_comparison['well'].tolist()
-        customdata = [[pred, fact, d] for pred, fact, d in zip(h_pred, h_fact, delta)]
-        fig = go.Figure()
-
-        fig.add_trace(go.Scatter(
-            x=x_pred,
-            y=y_pred,
-            mode='markers+text',
-            textposition="top center",
-            textfont=dict(size=10, color='black'),
-            text=wells,
-            customdata=customdata,
-            marker=dict(
-                size=12,
-                color=delta,
-                colorscale='Reds',  # Красная палитра для предсказаний
-                line=dict(width=2, color='darkorange'),
-                symbol='diamond'  # Ромбы для отличия
-            ),
-            hovertemplate=(
-                "X: %{x:.1f} | Y: %{y:.1f}<br>Pred: %{customdata[0]:.3f}<br>Fact: %{customdata[1]:.3f}<br><b>Δ: %{customdata[2]:+.3f}</b><extra></extra>"
-            ),
-            name='Предсказанные точки'
-        ))
-
-        # 1. САМЫЙ ПРОСТОЙ CONTOUR
-        fig.add_trace(go.Contour(
-            x=xi_list,
-            y=yi_list,
-            z=zi_extrapolated.tolist(),
-            colorscale='Viridis',
-            hoverinfo='skip',
-            opacity=0.8,
-            name='Интерполяция'
-        ))
-
-        # 2. Граница
-        fig.add_trace(go.Scatter(
-            x=boundary_x_list,
-            y=boundary_y_list,
-            mode='lines',
-            line=dict(color='red', width=3, dash='dash'),
-            name='Граница',
-            hoverinfo='skip'
-
-        ))
-
-        # # 3. Скважины БЕЗ text
-        # fig.add_trace(go.Scatter(
-        #     x=x_predict,
-        #     y=y_predict,
-        #     mode='markers',
-        #     marker=dict(
-        #         size=12,
-        #         color=h_kol_list,
-        #         colorscale='Viridis',
-        #         line=dict(width=2, color='white')
-        #     ),
-        #     name='Скважины'
-        # ))
-
-        # МИНИМАЛЬНЫЙ layout
-        fig.update_layout(
-            title=f'h_kol - {selected_method}',
-            xaxis_title='X',
-            yaxis_title='Y',
-            height=700,
-            hovermode='closest'
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
+# Настройка страницы
+st.set_page_config(layout="wide", page_title="Диаграмма скважин")
 
 # Заголовок приложения
 st.title("📊 Диаграмма скважин: Фактические vs Предсказанные значения")
@@ -275,90 +27,134 @@ uploaded_actual = st.sidebar.file_uploader(
 )
 
 uploaded_predict = st.sidebar.file_uploader(
-    "Загрузите razrez_predict.csv",
+    "Загрузите razrez_predict.csv", 
     type=['csv'],
     help="id, name, depth, value_predict"
 )
 
-
-# Функция для создания интерактивной гистограммы с фиксированной видимой областью
-def create_fixed_view_histogram(filtered_df, selected_wells, depth_range, stats_df):
-    """Создает гистограмму с фиксированной видимой областью (10 скважин) и скроллом"""
-
+# Функция для создания интерактивной гистограммы с индивидуальными шкалами глубин для каждой скважины
+def create_individual_scale_histogram(filtered_df, selected_wells, stats_df):
+    """Создает гистограмму с индивидуальными шкалами глубин для каждой скважины"""
+    
     # Настройки
     VISIBLE_WELLS = 10  # Количество скважин в видимой области
     bar_width = 0.35  # Ширина каждого столбца
     gap_between_wells = 0.6  # Промежуток между скважинами
-
+    
     # ЕДИНАЯ цветовая палитра
-    COLOR_COLLECTOR = '#FFD700'  # Желтый - коллектор
-    COLOR_NONCOLLECTOR = '#CCCCCC'  # Серый - неколлектор
-
-    # Создаем фигуру
+    COLOR_COLLECTOR = '#FFD700'    # Желтый - коллектор
+    COLOR_NONCOLLECTOR = '#CCCCCC' # Серый - неколлектор
+    
+    # Создаем фигуру с подграфиками для каждой скважины
+    # Используем make_subplots для создания общей структуры
     fig = go.Figure()
-
+    
+    # Собираем данные о диапазонах глубин для каждой скважины
+    well_ranges = {}
+    for well in selected_wells:
+        well_data = filtered_df[filtered_df['name'] == well]
+        if len(well_data) > 0:
+            min_depth = well_data['depth'].min()
+            max_depth = well_data['depth'].max()
+            # Добавляем небольшой запас сверху и снизу для лучшей визуализации
+            margin = (max_depth - min_depth) * 0.05 if max_depth > min_depth else 5
+            well_ranges[well] = {
+                'min': min_depth - margin,
+                'max': max_depth + margin,
+                'range': max_depth - min_depth
+            }
+    
+    # Нормализуем все глубины к общему диапазону для визуального выравнивания
+    # Это нужно, чтобы все скважины имели примерно одинаковую высоту на графике
+    normalized_ranges = {}
+    if well_ranges:
+        max_range = max(r['range'] for r in well_ranges.values())
+        for well, range_info in well_ranges.items():
+            normalized_ranges[well] = {
+                'min': 0,  # Все начинаются с 0
+                'max': range_info['range'] * (100 / max_range) if max_range > 0 else 100,
+                'original_min': range_info['min'],
+                'original_max': range_info['max'],
+                'scale_factor': 100 / max_range if max_range > 0 else 1
+            }
+    
     # Для каждой скважины
     for well_idx, well in enumerate(selected_wells):
         well_data = filtered_df[filtered_df['name'] == well].sort_values('depth')
-
+        
         if len(well_data) > 0:
             # Позиция скважины на оси X
             x_center = well_idx * (1 + gap_between_wells)
-
+            
+            # Получаем информацию о диапазоне для этой скважины
+            well_range = normalized_ranges.get(well, {'min': 0, 'max': 100, 'original_min': 0, 'original_max': 100, 'scale_factor': 1})
+            
+            # Нормализуем глубины для этой скважины
+            min_depth_original = well_data['depth'].min()
+            scale_factor = well_range['scale_factor']
+            
             # Создаем массивы для каждого типа данных
             fact_heights = []
             fact_bottoms = []
             fact_colors = []
             fact_hovertexts = []
-
+            
             pred_heights = []
             pred_bottoms = []
             pred_colors = []
             pred_hovertexts = []
-
+            
             # Обрабатываем каждую точку данных
             for i in range(len(well_data)):
                 row = well_data.iloc[i]
-                depth = row['depth']
-
-                # Определяем высоту сегмента
+                depth_original = row['depth']
+                
+                # Нормализуем глубину
+                depth_normalized = (depth_original - min_depth_original) * scale_factor
+                
+                # Определяем высоту сегмента в нормализованных единицах
                 if i < len(well_data) - 1:
-                    next_depth = well_data.iloc[i + 1]['depth']
-                    height = next_depth - depth
+                    next_depth_original = well_data.iloc[i + 1]['depth']
+                    height_original = next_depth_original - depth_original
+                    height_normalized = height_original * scale_factor
                 else:
                     # Для последней точки используем средний шаг
                     if len(well_data) > 1:
-                        avg_step = (well_data.iloc[-1]['depth'] - well_data.iloc[0]['depth']) / (len(well_data) - 1)
-                        height = avg_step
+                        avg_step_original = (well_data.iloc[-1]['depth'] - well_data.iloc[0]['depth']) / (len(well_data) - 1)
+                        height_original = avg_step_original
+                        height_normalized = avg_step_original * scale_factor
                     else:
-                        height = 1.0
-
+                        height_original = 1.0
+                        height_normalized = 1.0 * scale_factor
+                
                 # Фактические данные
                 fact_color = COLOR_COLLECTOR if row['value'] == 1 else COLOR_NONCOLLECTOR
-                fact_heights.append(height)
-                fact_bottoms.append(depth)
+                fact_heights.append(height_normalized)
+                fact_bottoms.append(depth_normalized)
                 fact_colors.append(fact_color)
                 fact_hovertexts.append(
                     f"<b>{well}</b> (факт)<br>"
-                    f"Глубина: {depth:.1f}-{depth + height:.1f} м<br>"
+                    f"Глубина: {depth_original:.1f} м<br>"
+                    f"Интервал: ~{height_original:.1f} м<br>"
                     f"Значение: {row['value']} {'(коллектор)' if row['value'] == 1 else '(неколлектор)'}"
                 )
-
+                
                 # Предсказанные данные
                 pred_color = COLOR_COLLECTOR if row['value_predict'] == 1 else COLOR_NONCOLLECTOR
-                pred_heights.append(height)
-                pred_bottoms.append(depth)
+                pred_heights.append(height_normalized)
+                pred_bottoms.append(depth_normalized)
                 pred_colors.append(pred_color)
                 pred_hovertexts.append(
                     f"<b>{well}</b> (предсказание)<br>"
-                    f"Глубина: {depth:.1f}-{depth + height:.1f} м<br>"
+                    f"Глубина: {depth_original:.1f} м<br>"
+                    f"Интервал: ~{height_original:.1f} м<br>"
                     f"Значение: {row['value_predict']} {'(коллектор)' if row['value_predict'] == 1 else '(неколлектор)'}<br>"
                     f"{'✓ Совпадение' if row['value'] == row['value_predict'] else '✗ Расхождение'}"
                 )
-
+            
             # Добавляем фактические данные (левый столбец)
             fig.add_trace(go.Bar(
-                x=[x_center - bar_width / 2] * len(fact_heights),
+                x=[x_center - bar_width/2] * len(fact_heights),
                 y=fact_heights,
                 base=fact_bottoms,
                 width=bar_width,
@@ -370,10 +166,10 @@ def create_fixed_view_histogram(filtered_df, selected_wells, depth_range, stats_
                 hoverinfo="text",
                 orientation='v'
             ))
-
+            
             # Добавляем предсказанные данные (правый столбец)
             fig.add_trace(go.Bar(
-                x=[x_center + bar_width / 2] * len(pred_heights),
+                x=[x_center + bar_width/2] * len(pred_heights),
                 y=pred_heights,
                 base=pred_bottoms,
                 width=bar_width,
@@ -385,16 +181,16 @@ def create_fixed_view_histogram(filtered_df, selected_wells, depth_range, stats_
                 hoverinfo="text",
                 orientation='v'
             ))
-
+            
             # Добавляем красную границу для расхождений
             for i in range(len(well_data)):
                 row = well_data.iloc[i]
                 if row['value'] != row['value_predict']:
                     # Определяем координаты для красной границы
-                    x_pos = x_center + bar_width / 2
+                    x_pos = x_center + bar_width/2
                     y_bottom = fact_bottoms[i]
                     height = fact_heights[i]
-
+                    
                     # Добавляем невидимый след для границы
                     fig.add_trace(go.Scatter(
                         x=[x_pos, x_pos],
@@ -405,7 +201,7 @@ def create_fixed_view_histogram(filtered_df, selected_wells, depth_range, stats_
                         name='',
                         hoverinfo='skip'
                     ))
-
+    
     # Настройка осей
     fig.update_xaxes(
         title_text="Скважины",
@@ -417,23 +213,28 @@ def create_fixed_view_histogram(filtered_df, selected_wells, depth_range, stats_
         # Фиксируем видимую область (первые 10 скважин)
         range=[-0.5, min(VISIBLE_WELLS, len(selected_wells)) * (1 + gap_between_wells) - 0.5]
     )
-
+    
+    # Настраиваем ось Y для нормализованных значений
     fig.update_yaxes(
-        title_text="Глубина, м",
+        title_text="Нормализованная глубина",
         autorange="reversed",
         showgrid=True,
         gridwidth=1,
         gridcolor='LightGray',
-        zeroline=False
+        zeroline=False,
+        # Используем тики, но подписываем их реальными значениями из первой скважины для ориентира
+        tickmode='array',
+        tickvals=[0, 25, 50, 75, 100],
+        ticktext=['Мин', '', 'Средн', '', 'Макс']
     )
-
+    
     # Вычисляем общую ширину для всех скважин
     total_width = len(selected_wells) * (1 + gap_between_wells)
-
+    
     # Настройка макета с горизонтальным скроллом
     fig.update_layout(
         height=700,
-        title_text=f"Гистограмма скважин ({len(selected_wells)} шт.) | Видимо {min(VISIBLE_WELLS, len(selected_wells))} из {len(selected_wells)}",
+        title_text=f"Гистограмма скважин ({len(selected_wells)} шт.) | Индивидуальные шкалы глубин",
         barmode='group',
         bargap=0,
         bargroupgap=0,
@@ -465,7 +266,7 @@ def create_fixed_view_histogram(filtered_df, selected_wells, depth_range, stats_
         # Ширина для отображения всех скважин в скроллере
         width=1200
     )
-
+    
     # Добавляем процент ошибок под скважинами
     for well_idx, well in enumerate(selected_wells):
         error_row = stats_df[stats_df['Скважина'] == well]
@@ -473,16 +274,16 @@ def create_fixed_view_histogram(filtered_df, selected_wells, depth_range, stats_
             error_pct = float(error_row['Ошибка (%)'].values[0].replace('%', ''))
             color = 'red' if error_pct > 20 else 'orange' if error_pct > 10 else 'green'
             x_pos = well_idx * (1 + gap_between_wells)
-
+            
             fig.add_annotation(
                 x=x_pos,
-                y=depth_range[0] - (depth_range[1] - depth_range[0]) * 0.05,
+                y=-5,  # Немного ниже графика
                 text=f"{error_pct:.1f}%",
                 showarrow=False,
                 font=dict(color=color, size=10, weight='bold'),
                 yref="y"
             )
-
+    
     # УПРОЩЕННАЯ ЛЕГЕНДА: только коллектор/неколлектор
     fig.add_trace(go.Bar(
         x=[None], y=[None],
@@ -491,7 +292,7 @@ def create_fixed_view_histogram(filtered_df, selected_wells, depth_range, stats_
         showlegend=True,
         width=0  # Невидимый бар для легенды
     ))
-
+    
     fig.add_trace(go.Bar(
         x=[None], y=[None],
         marker_color=COLOR_NONCOLLECTOR,
@@ -499,7 +300,7 @@ def create_fixed_view_histogram(filtered_df, selected_wells, depth_range, stats_
         showlegend=True,
         width=0  # Невидимый бар для легенды
     ))
-
+    
     fig.add_trace(go.Scatter(
         x=[None], y=[None],
         mode='lines',
@@ -507,9 +308,20 @@ def create_fixed_view_histogram(filtered_df, selected_wells, depth_range, stats_
         name='Расхождение',
         showlegend=True
     ))
-
+    
+    # Добавляем информацию о глубинах в легенду или как аннотацию
+    fig.add_annotation(
+        x=0.5,
+        y=1.12,
+        xref="paper",
+        yref="paper",
+        text="ℹ️ Каждая скважина имеет свою шкалу глубин (нормализована для сравнения)",
+        showarrow=False,
+        font=dict(size=10, color="gray"),
+        align="center"
+    )
+    
     return fig
-
 
 # Основной контент приложения
 if uploaded_actual is not None and uploaded_predict is not None:
@@ -517,9 +329,9 @@ if uploaded_actual is not None and uploaded_predict is not None:
         # Загрузка данных
         actual_df = pd.read_csv(uploaded_actual)
         predict_df = pd.read_csv(uploaded_predict)
-
+        
         st.sidebar.success("✅ Файлы успешно загружены!")
-
+        
         # Показать информацию о данных
         with st.expander("📋 Информация о данных"):
             col1, col2 = st.columns(2)
@@ -528,23 +340,23 @@ if uploaded_actual is not None and uploaded_predict is not None:
                 st.write(f"- Записей: {len(actual_df):,}")
                 st.write(f"- Уникальных скважин: {actual_df['name'].nunique()}")
                 st.write(f"- Диапазон глубин: {actual_df['depth'].min():.1f} - {actual_df['depth'].max():.1f} м")
-
+            
             with col2:
                 st.write("**Предсказанные данные:**")
                 st.write(f"- Записей: {len(predict_df):,}")
                 st.write(f"- Уникальных скважин: {predict_df['name'].nunique()}")
                 st.write(f"- Диапазон глубин: {predict_df['depth'].min():.1f} - {predict_df['depth'].max():.1f} м")
-
+        
         # Объединение данных
         df = pd.merge(actual_df, predict_df, on=['id', 'name', 'depth'])
         df = df.sort_values(['name', 'depth'])
-
+        
         # Уникальные скважины
         wells = df['name'].unique().tolist()
-
+        
         # Настройки визуализации
         st.sidebar.header("⚙️ Настройки отображения")
-
+        
         # Выбор скважин - ВСЕ по умолчанию
         selected_wells = st.sidebar.multiselect(
             "Выберите скважины:",
@@ -552,48 +364,53 @@ if uploaded_actual is not None and uploaded_predict is not None:
             default=wells,  # ВСЕ скважины по умолчанию
             help="Все скважины выбраны по умолчанию. Можно изменить выбор."
         )
-
+        
         # Если ничего не выбрано, показываем все
         if not selected_wells:
             selected_wells = wells
-
-        # Ползунок для диапазона глубин
+        
+        # Ползунок для диапазона глубин (теперь информационный, а не фильтрующий)
         min_depth = float(df['depth'].min())
         max_depth = float(df['depth'].max())
-
-        # Автоматический выбор разумного диапазона
-        depth_mid = (min_depth + max_depth) / 2
-        depth_span = min(200, max_depth - min_depth)  # Максимум 200 метров
-
-        depth_range = st.sidebar.slider(
-            "Диапазон глубин (м):",
-            min_value=min_depth,
-            max_value=max_depth,
-            value=(max(min_depth, depth_mid - depth_span / 2),
-                   min(max_depth, depth_mid + depth_span / 2)),
-            step=1.0
-        )
-
+        
+        # Информация о диапазоне глубин
+        st.sidebar.header("📊 Информация о глубинах")
+        
+        # Собираем статистику по выбранным скважинам
+        depth_stats = []
+        for well in selected_wells:
+            well_data = df[df['name'] == well]
+            if len(well_data) > 0:
+                depth_stats.append({
+                    'Скважина': well,
+                    'Мин. глубина': f"{well_data['depth'].min():.1f} м",
+                    'Макс. глубина': f"{well_data['depth'].max():.1f} м",
+                    'Диапазон': f"{well_data['depth'].max() - well_data['depth'].min():.1f} м",
+                    'Точек': len(well_data)
+                })
+        
+        if depth_stats:
+            depth_stats_df = pd.DataFrame(depth_stats)
+            
+            with st.sidebar.expander("📈 Диапазоны глубин по скважинам"):
+                st.dataframe(depth_stats_df.set_index('Скважина'), height=300)
+        
         # Информация о выбранных скважинах
         st.sidebar.header("📊 Информация")
         st.sidebar.write(f"Выбрано скважин: {len(selected_wells)}")
-
+        
         if len(selected_wells) > 0:
-            # Фильтрация данных
-            filtered_df = df[
-                (df['name'].isin(selected_wells)) &
-                (df['depth'] >= depth_range[0]) &
-                (df['depth'] <= depth_range[1])
-                ].copy()
-
+            # Фильтрация данных (без фильтрации по глубине, чтобы сохранить все данные каждой скважины)
+            filtered_df = df[df['name'].isin(selected_wells)].copy()
+            
             # Сортировка
-            filtered_df['name'] = pd.Categorical(filtered_df['name'],
-                                                 categories=selected_wells,
-                                                 ordered=True)
+            filtered_df['name'] = pd.Categorical(filtered_df['name'], 
+                                               categories=selected_wells, 
+                                               ordered=True)
             filtered_df = filtered_df.sort_values(['name', 'depth'])
-
+            
             st.sidebar.write(f"Точек данных: {len(filtered_df):,}")
-
+            
             # Статистика ошибок
             stats_data = []
             for well in selected_wells:
@@ -603,7 +420,7 @@ if uploaded_actual is not None and uploaded_predict is not None:
                     total = len(well_data)
                     accuracy = correct / total * 100 if total > 0 else 0
                     error = 100 - accuracy
-
+                    
                     stats_data.append({
                         'Скважина': well,
                         'Всего точек': total,
@@ -612,88 +429,98 @@ if uploaded_actual is not None and uploaded_predict is not None:
                         'Точность (%)': f"{accuracy:.1f}",
                         'Ошибка (%)': f"{error:.1f}"
                     })
-
+            
             stats_df = pd.DataFrame(stats_data)
-
+            
             # Основная статистика
             st.header("📊 Статистика точности")
-
+            
             col1, col2, col3, col4 = st.columns(4)
-
+            
             with col1:
                 total_points = stats_df['Всего точек'].sum()
                 st.metric("Всего точек", f"{total_points:,}")
-
+            
             with col2:
                 overall_accuracy = stats_df['Правильно'].sum() / total_points * 100 if total_points > 0 else 0
                 st.metric("Общая точность", f"{overall_accuracy:.1f}%")
-
+            
             with col3:
                 avg_error = stats_df['Ошибка (%)'].str.replace('%', '').astype(float).mean()
                 st.metric("Средняя ошибка", f"{avg_error:.1f}%")
-
+            
             with col4:
                 if len(stats_df) > 0:
                     worst_idx = stats_df['Ошибка (%)'].str.replace('%', '').astype(float).idxmax()
                     worst = stats_df.loc[worst_idx]
-                    st.metric("Макс. ошибка",
-                              f"{worst['Ошибка (%)']}",
-                              delta=worst['Скважина'])
-
+                    st.metric("Макс. ошибка", 
+                             f"{worst['Ошибка (%)']}",
+                             delta=worst['Скважина'])
+            
             # Детальная таблица статистики
             with st.expander("📋 Подробная статистика по скважинам"):
                 st.dataframe(stats_df.set_index('Скважина'), width='stretch')
-
+            
             # Визуализация
-            st.header("📈 Гистограмма скважин")
-
+            st.header("📈 Гистограмма скважин с индивидуальными шкалами")
+            
             # Информация о визуализации
             st.markdown(f"""
             **Настройки отображения:**
             - 📍 **Видимая область:** 10 скважин (остальные через скролл)
-            - 🎯 **Диапазон глубин:** {depth_range[0]:.1f} - {depth_range[1]:.1f} м
             - 📊 **Всего скважин:** {len(selected_wells)}
             - 🎨 **Цветовая схема:** 🟡 Желтый = коллектор, ⚪ Серый = неколлектор
+            - 📐 **Шкала глубин:** Каждая скважина имеет свою собственную шкалу (нормализована для сравнения)
+            
+            **ℹ️ Важно:** 
+            - Каждая скважина отображается с оптимальным масштабом для её собственных данных
+            - Все глубины нормализованы, чтобы скважины были сравнимы по высоте
+            - Реальные значения глубин видны при наведении курсора
             """)
-
+            
             # Создаем и отображаем график
-            fig = create_fixed_view_histogram(filtered_df, selected_wells, depth_range, stats_df)
-
+            fig = create_individual_scale_histogram(filtered_df, selected_wells, stats_df)
+            
             # Отображаем график
             st.plotly_chart(fig, use_container_width=True, height=750)
-
+            
             # Инструкция по использованию
             st.info("""
             **🎮 Как использовать график:**
-
+            
             ### 🔍 Приближение (Zoom):
             - **Выделите область мышкой** - зажмите левую кнопку мыши и выделите прямоугольник для приближения
             - **Колесико мыши** - прокрутите для приближения/отдаления
             - **Двойной клик** - сбросить масштаб
-
+            
             ### 📜 Горизонтальный скролл:
             - **Ползунок внизу** - для прокрутки всех скважин
             - **На ползунке:** 
               * Левая часть - видимая область (10 скважин)
               * Правая часть - все остальные скважины
-
+            
             ### 🖱️ Интерактивность:
-            - **Наведите курсор** на любой столбец для детальной информации
+            - **Наведите курсор** на любой столбец для детальной информации (реальные глубины)
             - **Красные пунктирные границы** показывают расхождения
             - **Процент ошибки** под каждой скважиной
+            
+            ### 📐 Особенности шкал:
+            - **Ось Y:** Нормализованная глубина (все скважины приведены к одной высоте)
+            - **Реальные значения:** Видны при наведении курсора
+            - **Мин/Макс:** Относительные значения для каждой скважины
             """)
-
+            
             # Анализ расхождений
             st.header("🔍 Анализ расхождений")
-
+            
             discrepancies = filtered_df[filtered_df['value'] != filtered_df['value_predict']].copy()
-
+            
             if len(discrepancies) > 0:
                 col1, col2 = st.columns(2)
-
+                
                 with col1:
                     st.write("**Типы ошибок:**")
-
+                    
                     error_types = pd.DataFrame({
                         'Тип ошибки': ['Ложные срабатывания (0→1)', 'Пропущенные коллекторы (1→0)'],
                         'Количество': [
@@ -701,37 +528,36 @@ if uploaded_actual is not None and uploaded_predict is not None:
                             len(discrepancies[discrepancies['value'] == 1])
                         ],
                         '% от всех точек': [
-                            f"{len(discrepancies[discrepancies['value'] == 0]) / len(filtered_df) * 100:.1f}%",
-                            f"{len(discrepancies[discrepancies['value'] == 1]) / len(filtered_df) * 100:.1f}%"
+                            f"{len(discrepancies[discrepancies['value'] == 0])/len(filtered_df)*100:.1f}%",
+                            f"{len(discrepancies[discrepancies['value'] == 1])/len(filtered_df)*100:.1f}%"
                         ]
                     })
-
+                    
                     st.dataframe(error_types, width='stretch')
-
+                
                 with col2:
                     st.write("**Матрица ошибок:**")
-
+                    
                     confusion = pd.crosstab(
                         filtered_df['value'],
                         filtered_df['value_predict'],
                         rownames=['Факт'],
                         colnames=['Предсказание']
                     )
-
+                    
                     # Создаем визуализацию матрицы ошибок
                     fig_conf, ax_conf = plt.subplots(figsize=(6, 5))
-
+                    
                     im = ax_conf.imshow(confusion.values, cmap='Reds', aspect='auto')
-
+                    
                     # Добавляем текст
                     for i in range(confusion.shape[0]):
                         for j in range(confusion.shape[1]):
                             text = ax_conf.text(j, i, confusion.iloc[i, j],
-                                                ha="center", va="center",
-                                                color="white" if confusion.iloc[
-                                                                     i, j] > confusion.values.max() / 2 else "black",
-                                                fontsize=14, fontweight='bold')
-
+                                              ha="center", va="center", 
+                                              color="white" if confusion.iloc[i, j] > confusion.values.max()/2 else "black",
+                                              fontsize=14, fontweight='bold')
+                    
                     ax_conf.set_xticks(range(2))
                     ax_conf.set_yticks(range(2))
                     ax_conf.set_xticklabels(['0 (неколлектор)', '1 (коллектор)'])
@@ -739,13 +565,13 @@ if uploaded_actual is not None and uploaded_predict is not None:
                     ax_conf.set_xlabel('Предсказание', fontsize=12)
                     ax_conf.set_ylabel('Факт', fontsize=12)
                     ax_conf.set_title('Матрица ошибок', fontsize=14, fontweight='bold')
-
+                    
                     plt.colorbar(im, ax=ax_conf)
                     plt.tight_layout()
-
+                    
                     st.pyplot(fig_conf)
                     plt.close(fig_conf)
-
+                
                 # Таблица с расхождениями
                 with st.expander("📄 Детализация расхождений (первые 50)"):
                     st.dataframe(
@@ -757,10 +583,10 @@ if uploaded_actual is not None and uploaded_predict is not None:
                     )
             else:
                 st.success("🎉 Совпадение 100%! Нет расхождений между фактическими и предсказанными данными.")
-
+        
         else:
             st.warning("⚠️ Нет данных для выбранных параметров")
-
+    
     except Exception as e:
         st.error(f"Ошибка при обработке данных: {str(e)}")
         st.info("Проверьте структуру файлов. Ожидаемые столбцы: id, name, depth, value (value_predict)")
@@ -768,50 +594,55 @@ if uploaded_actual is not None and uploaded_predict is not None:
 else:
     # Инструкция при первом запуске
     st.info("👈 Загрузите CSV файлы для начала работы")
-
+    
     with st.expander("📖 Инструкция по использованию"):
         st.markdown("""
         ### 📋 Формат данных:
-
+        
         **Файл 1 (razrez.csv):**
         - id, name, depth, value
         - value: 1=коллектор, 0=неколлектор
-
+        
         **Файл 2 (razrez_predict.csv):**
         - id, name, depth, value_predict
         - value_predict: 1=коллектор, 0=неколлектор
-
+        
         ### 🎨 Визуализация:
-
+        
         **Основной график:**
         - По оси X: названия скважин
-        - По оси Y: глубина (увеличивается вниз)
+        - По оси Y: нормализованная глубина (каждая скважина имеет свою шкалу)
         - Для каждой скважины: 2 столбца (факт и предсказание)
         - **Видимо сразу:** 10 скважин
         - **Остальные:** через горизонтальный скролл
-
+        
         **Цвета:**
         - 🟡 **Желтый:** Коллектор (значение = 1)
         - ⚪ **Серый:** Неколлектор (значение = 0)
-
+        
+        **Особенности:**
+        - 📐 **Индивидуальные шкалы:** Каждая скважина отображается с оптимальным масштабом
+        - 🔄 **Нормализация:** Все скважины приведены к одинаковой высоте для сравнения
+        - 🎯 **Реальные значения:** Видны при наведении курсора
+        
         ### 🎮 Управление:
-
+        
         **Приближение:**
         1. Зажмите левую кнопку мыши
         2. Выделите прямоугольную область
         3. Отпустите кнопку для приближения
-
+        
         **Скролл:**
         - Используйте ползунок внизу графика
         - Левая часть ползунка = видимая область
         - Правая часть = все скважины
-
+        
         **Информация:**
-        - Наведите курсор на столбец для деталей
+        - Наведите курсор на столбец для реальных значений глубин
         - Процент ошибки под каждой скважиной
         - Красные границы = расхождения
         """)
 
 # Футер
 st.markdown("---")
-st.caption("Диаграмма скважин | Видимо 10 скважин, остальные через скролл | Zoom мышкой")
+st.caption("Диаграмма скважин | Индивидуальные шкалы глубин | Zoom мышкой")

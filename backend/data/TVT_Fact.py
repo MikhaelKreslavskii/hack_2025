@@ -5,9 +5,8 @@ from backend.data.Base import Base
 
 
 class TVT_Fact(Base):
-    __tablename__ = "tvt_Fact";
-    id = Column(Integer, primary_key=True);
+    __tablename__ = "tvt_fact";
     name = Column(String,primary_key=True);
     x = Column(Float)
     y = Column(Float)
-    md = Column(Float)
+    h_kol = Column(Float)

@@ -1,9 +1,9 @@
 
 from sqlalchemy import Column, Integer, String, Float
-from sqlalchemy.orm import DeclarativeBase
 
-class Base(DeclarativeBase):
-    pass
+from backend.data.Base import Base
+
+
 class Well(Base):
     __tablename__ = "well";
     id = Column(Integer, primary_key=True);

@@ -1,10 +1,7 @@
-from fastapi import FastAPI, UploadFile, File
-import zipfile
+from fastapi import FastAPI
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from backend.data.Well import Base
+from backend.data.Base import Base
 from backend.data.database import engine
 from backend.endpoint.upload_files import router
 app = FastAPI()

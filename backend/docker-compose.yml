@@ -10,8 +10,9 @@ services:
       POSTGRES_DB: tatneft
     volumes:
       - postgres_data:/var/lib/postgresql/data # Persist data in a named volume
+      - ./init-scripts:/docker-entrypoint-initdb.d
     ports:
       - "6422:5432" # Map the container's port 5432 to the host's port 5432
 
-volumes:
+volumes:  # ✅ ДОБАВЬТЕ!
   postgres_data:
